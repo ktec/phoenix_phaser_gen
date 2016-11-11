@@ -54,6 +54,7 @@ mkdir -p web/static/js/common
 
 cat >web/static/js/states/Lobby.js <<EOL
 import { createLabel } from "../common/labels"
+import { syncPosition } from "../common/sync"
 
 export class Lobby extends Phaser.State {
   init(...args) {
@@ -62,13 +63,13 @@ export class Lobby extends Phaser.State {
   }
 
   create() {
-    const label = createLabel(this, "Hello world", this.channel)
+    const label = createLabel(this, "Hello world")
     label.anchor.setTo(0.5)
     label.inputEnabled = true
     label.input.enableDrag()
 
     // send message on drag stop [sprite, channel, event]
-    syncPosition(label, this.channel, this.label.events.onDragStop)
+    syncPosition(label, this.channel, label.events.onDragUpdate)
   }
 }
 EOL
@@ -97,10 +98,10 @@ export const joinChannel = (channel, success, failure, timeout) => {
 }
 
 // joinOk :: Response -> Console
-const joinOk = (response) => console.log(`Joined successfully`, response)
+const joinOk = (response) => console.log(\`Joined successfully\`, response)
 
 // joinError :: Response -> Console
-const joinError = (response) => console.log(`Failed to join channel`, response)
+const joinError = (response) => console.log(\`Failed to join channel\`, response)
 
 // joinError :: Null -> Console
 const joinTimeout = () => console.log("Networking issue. Still waiting...")
@@ -110,15 +111,28 @@ cat >web/static/js/common/sync.js <<EOL
 // syncPosition :: Sprite -> Channel -> Event -> Function -> Event -> Event
 export const syncPosition = (sprite, channel, event) => {
   event.add(sprite => sendPosition(sprite, channel))
+  receivePosition(sprite, channel)
 }
 
 // sendPosition :: Sprite -> Channel -> String
 export const sendPosition = (sprite, channel) => {
-  console.log(serializePosition(sprite))
+  const message = serializePosition(sprite)
+  console.log("Sending message", message)
+  channel.push("position", message)
 }
 
 // serializePosition :: Sprite -> Object
 export const serializePosition = ({x, y}) => Object.assign({x, y})
+
+// receivePosition = Sprite -> Channel -> Push
+export const receivePosition = (sprite, channel) => {
+  const callback = (message) => {
+    console.log("Received message", message)
+    const {x,y} = message
+    sprite.position.setTo(x, y)
+  }
+  channel.on("position", callback)
+}
 EOL
 
 cat > web/channels/games_channel.ex <<EOL
@@ -133,8 +147,8 @@ defmodule Tracker.GamesChannel do
     end
   end
 
-  def handle_in("shout", payload, socket) do
-    broadcast socket, "shout", payload
+  def handle_in("position", payload, socket) do
+    broadcast_from socket, "position", payload
     {:noreply, socket}
   end
 
@@ -152,3 +166,9 @@ ed web/channels/user_socket.ex << END
 w
 q
 END
+
+# sed -e $'5i\\\n\   {:ok, socket}' games_channel.ex
+# Need a good way to only replace if its not already there...
+# position='5i';
+# string='  channel "games:lobby", Tracker.GamesChannel';
+# sed -e "$position\|$string|h; \${x;s|$string||;{g;t};a\\" -e "$string" -e "}" file
