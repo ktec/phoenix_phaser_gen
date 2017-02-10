@@ -1,0 +1,213 @@
+diff --git a/web/static/js/common/channels.js b/web/static/js/common/channels.js
+--- a/web/static/js/common/channels.js
++++ b/web/static/js/common/channels.js
+@@ -2,17 +2,33 @@
+ export const joinChannel = (channel, success, failure, timeout) => {
+   channel
+     .join()
+-    .receive("ok", success || joinOk)
++    .receive("ok", (rsp) => {
++      console.debug(channel)
++      success(rsp) || joinOk(rsp)
++    })
+     .receive("error", failure || joinError)
+-    .receive("timeout", timeout || joinTimeout)
++    .receive("timeout", (rsp) => {
++      console.debug(channel)
++      timeout(rsp) || joinTimeout(rsp)
++    })
+   return channel
+ }
+
+ // joinOk :: Response -> Console
+ const joinOk = (response) => console.log(`Joined successfully`, response)
+
+ // joinError :: Response -> Console
+ const joinError = (response) => console.log(`Failed to join channel`, response)
+
+ // joinError :: Null -> Console
+ const joinTimeout = () => console.log("Networking issue. Still waiting...")
++
++// leaveChannel :: Channel -> Function -> SideEffects!!!
++export const leaveChannel = (channel, callback) => {
++  console.log(`leaving ${channel.topic} channel`)
++  // Ok I dont have time to debug this right now, however this does stop
++  // the bug from occurring. There is intermitted situation when the attempt
++  // to leave the channel results in a ...... error.
++  channel.timeout = 10 // dirty hack sorry!!!
++  channel.leave().receive("ok", callback)
++}
+
+diff --git a/web/static/js/common/sync.js b/web/static/js/common/sync.js
+--- a/web/static/js/common/sync.js
++++ b/web/static/js/common/sync.js
+@@ -1,18 +1,20 @@
++const BROADCAST_FREQUENCY = 16 // 60fps approx
++
++// serializePosition :: Sprite -> Object
++export const serializePosition = ({id, x, y}) => Object.assign({id, x, y})
++
+ // syncPosition :: Sprite -> Channel -> Event -> Function -> Event -> Event
+ export const syncPosition = (sprite, channel, event) => {
+   event.add(sprite => sendPosition(sprite, channel))
+   receivePosition(sprite, channel)
+ }
+
+ // sendPosition :: Sprite -> Channel -> String
+ export const sendPosition = (sprite, channel) => {
+   const message = serializePosition(sprite)
+   console.log("Sending message", message)
+   channel.push("position", message)
+ }
+
+-// serializePosition :: Sprite -> Object
+-export const serializePosition = ({x, y}) => Object.assign({x, y})
+-
+ // receivePosition = Sprite -> Channel -> Push
+ export const receivePosition = (sprite, channel) => {
+
+diff --git a/web/static/js/common/sync.js b/web/static/js/common/sync.js
+--- a/web/static/js/common/sync.js
++++ b/web/static/js/common/sync.js
+@@ -9,17 +11,29 @@ export const syncPosition = (sprite, channel, event) => {
+
+ // sendPosition :: Sprite -> Channel -> Push
+ export const sendPosition = (sprite, channel) => {
+-  const message = serializePosition(sprite)
+-  console.log("Sending message", message)
+-  channel.push("position", message)
++  channel.push("position", serializePosition(sprite))
+ }
+
+ // receivePosition = Sprite -> Channel -> Push
+ export const receivePosition = (sprite, channel) => {
+-  const callback = (message) => {
+-    console.log("Received message", message)
+-    const {x,y} = message
+-    sprite.position.setTo(x, y)
++  const callback = ({id, x, y}) => {
++    if (id === sprite.id) { sprite.position.setTo(x, y) }
+   }
+   channel.on("position", callback)
++  // remove the callback when the sprite is destroyed
++  removeCallbackOnDestroy(sprite, channel, callback)
++}
++
++const removeCallbackOnDestroy = (sprite, channel, callback) => {
++  sprite.events.onDestroy.add(() => {
++    channel.bindings = channel.bindings.filter(b => {
++      return b.callback !== callback
++    })
++  })
++}
++
++// sendMessage :: Timer -> Sprite -> TimerEvent
++export const sharePosition = (sprite, channel, framerate = BROADCAST_FREQUENCY) => {
++  const timer = sprite.game.time.events
++  timer.loop(framerate, () => { sendPosition(sprite, channel) })
+ }
+
+diff --git a/web/static/js/common/sync_labels.js b/web/static/js/common/sync_labels.js
+new file mode 100644
+index 0000000..d3a4b6d
+--- /dev/null
++++ b/web/static/js/common/sync_labels.js
+@@ -0,0 +1,17 @@
++import { createLabel } from "./labels"
++import { syncPosition } from "./sync"
++
++// createSyncLabel :: State -> String -> Channel -> String -> Sprite
++export const createSyncLabel = (state, message, channel, id) => {
++  const label = createLabel(state, message)
++  label.anchor.setTo(0.5)
++  label.inputEnabled = true
++  label.input.enableDrag()
++
++  label.id = id
++
++  // send message on drag stop [sprite, channel, event]
++  syncPosition(label, channel, label.events.onDragUpdate)
++
++ return label
++}
+
+diff --git a/web/static/js/states/Lobby.js b/web/static/js/states/Lobby.js
+--- a/web/static/js/states/Lobby.js
++++ b/web/static/js/states/Lobby.js
+@@ -1,19 +1,26 @@
+-import { createLabel } from "../common/labels"
+-import { syncPosition } from "../common/sync"
+-
+-export class Lobby extends Phaser.State {
+-  init(...args) {
+-    const [channel] = args
+-    this.channel = channel
+-  }
+-
+-  create() {
+-    const label = createLabel(this, "Hello world")
+-    label.anchor.setTo(0.5)
+-    label.inputEnabled = true
+-    label.input.enableDrag()
+-
+-    // send message on drag stop [sprite, channel, event]
+-    syncPosition(label, this.channel, label.events.onDragUpdate)
+-  }
+-}
++import { createLabel } from "../common/labels"
++import { createSyncLabel } from "../common/sync_labels"
++import { syncPosition } from "../common/sync"
++import { leaveChannel } from "../common/channels"
++
++export class Lobby extends Phaser.State {
++  init(...args) {
++    console.log("starting Lobby state")
++    const [channel] = args
++    this.channel = channel
++   }
++
++  create(game) {
++    game.stage.backgroundColor = 0x000000
++
++    const label = createSyncLabel(this, "Move me!", this.channel, "1")
++
++    const label2 = createLabel(this, "Click to Play")
++    label2.anchor.setTo(0.5)
++    label2.inputEnabled = true
++    label2.y += 100
++    label2.events.onInputDown.add(() =>
++      leaveChannel(this.channel, game.gotoPlay)
++    )
++  }
++}
+
+diff --git a/web/static/js/states/Play.js b/web/static/js/states/Play.js
+new file mode 100644
+--- /dev/null
++++ b/web/static/js/states/Play.js
+@@ -0,0 +1,25 @@
++import { createLabel } from "../common/labels"
++import { createSyncLabel } from "../common/sync_labels"
++import { leaveChannel } from "../common/channels"
++
++export class Play extends Phaser.State {
++  create(game) {
++    game.stage.backgroundColor = 0x551A8B
++
++    const label = createSyncLabel(this, "Move me!", this.channel, "1")
++
++    const label2 = createLabel(this, "Click to return to Lobby")
++    label2.anchor.setTo(0.5)
++    label2.inputEnabled = true
++    label2.y += 100
++    label2.events.onInputDown.add(() =>
++      leaveChannel(this.channel, game.gotoLobby)
++    )
++  }
++
++  init(...options) {
++    console.log("starting Play state")
++    const [channel] = options
++    this.channel = channel
++  }
++}
